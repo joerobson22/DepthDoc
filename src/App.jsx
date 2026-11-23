@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import guideMarkdown from '../data/usage-guide.md?raw';
 import {
   BookOpen,
   Code2,
@@ -18,117 +19,21 @@ import {
   Clock,
   Plus,
   Table,
-  HelpCircle,
   Sigma,
   RotateCcw,
-  BookCopy,
   FileText,
-  ChevronLeft,
   Sun,
   Moon,
   Save,
-  FolderOpen,
   Trash2,
   FilePlus2,
   PanelLeftClose,
   PanelLeftOpen,
-  FolderSync,
-  HardDrive
+  Lock
 } from 'lucide-react';
 
-// ============================================================================
-// LOCAL DISK (data/ FOLDER) & INDEXEDDB PERSISTENCE HELPERS
-// ============================================================================
-const IDB_NAME = 'depthdoc-local-store';
-const IDB_STORE = 'workspace';
-const GUIDE_FILE_NAME = 'multi-altitude-latex-guide.md';
-
-function openWorkspaceDb() {
-  return new Promise((resolve, reject) => {
-    if (typeof indexedDB === 'undefined') {
-      reject(new Error('IndexedDB unavailable'));
-      return;
-    }
-    const req = indexedDB.open(IDB_NAME, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(IDB_STORE)) {
-        db.createObjectStore(IDB_STORE);
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function idbGet(key) {
-  try {
-    const db = await openWorkspaceDb();
-    return await new Promise((resolve, reject) => {
-      const tx = db.transaction(IDB_STORE, 'readonly');
-      const req = tx.objectStore(IDB_STORE).get(key);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-  } catch {
-    return null;
-  }
-}
-
-async function idbSet(key, value) {
-  try {
-    const db = await openWorkspaceDb();
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(IDB_STORE, 'readwrite');
-      const req = tx.objectStore(IDB_STORE).put(value, key);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    });
-  } catch {
-    // Fallback silently if storage is restricted
-  }
-}
-
-function slugifyFileName(title, fallbackId = 'proposal') {
-  const clean = (title || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return `${clean || fallbackId}.md`;
-}
-
-async function syncFromDirectoryHandle(dirHandle) {
-  const docs = [];
-  for await (const [name, handle] of dirHandle.entries()) {
-    if (handle.kind === 'file' && name.endsWith('.md')) {
-      const file = await handle.getFile();
-      const content = await file.text();
-      docs.push({
-        id: `fs-${name}`,
-        fileName: name,
-        title: deriveDocumentTitle(content) || name.replace(/\.md$/i, ''),
-        content,
-        updatedAt: new Date(file.lastModified).toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit'
-        })
-      });
-    }
-  }
-  return docs;
-}
-
-async function writeMarkdownToDirectory(dirHandle, fileName, content) {
-  try {
-    const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
-    const writable = await fileHandle.createWritable();
-    await writable.write(content);
-    await writable.close();
-    return true;
-  } catch {
-    return false;
-  }
-}
+const GUIDE_DOC_ID = 'usage-guide';
+const ACTIVE_DOC_KEY = 'depthdoc-active-doc';
 
 // ============================================================================
 // KATEX LOADER & DEPTH CONFIGURATION CONSTANTS
@@ -450,28 +355,6 @@ $$v_{\\text{eff}}(u, t) = \\left(\\frac{1}{|K_t|} \\sum_{k \\in K_t} \\frac{s_{u
   }
 }
 \`\`\`
-:::
-:::
-:::`;
-
-const SYNTAX_GUIDE_MD = `# Multi-Altitude & LaTeX Authoring Guide
-
-Use fenced \`:::\` containers to layer your proposal from executive takeaways down to mathematical proofs.
-
-:::executive[1. Top-Level Executive Pillars]
-\`:::executive[Title]\` blocks always remain at the top level—opening a new \`:::executive[...]\` automatically closes any prior executive block so pillars stay cleanly separated.
-
-:::product[2. Nested Product & Sub-Product Layers]
-\`:::product[Title]\` blocks can contain nested \`:::product[Sub-Product]\` blocks to organize modular features without cluttering the executive summary.
-
-:::technical[3. Technical Architecture & Deep Dives]
-Place system architecture inside \`:::technical[Title]\` and equations/code inside \`:::deep-dive[Title]\`.
-
-:::deep-dive[4. Inline & Display LaTeX Formulas]
-- **Inline Math:** Wrap expressions in single dollar signs like \`$\\sum \\text{Hours} \\le \\text{Capacity}$\` → $\\sum \\text{Hours} \\le \\text{Capacity}$.
-- **Display Math:** Wrap standalone equations in double dollar signs \`$$ ... $$\`:
-$$\\mathcal{L}(x, \\lambda) = f(x) + \\sum_{i=1}^{m} \\lambda_i g_i(x)$$
-:::
 :::
 :::
 :::`;
@@ -931,6 +814,8 @@ function MarkdownContent({
     return result;
   }, [content, baseStartOffset, baseEndOffset]);
 
+  const linked = !!onSelectRange;
+
   const handleBlockClick = (e, block) => {
     if (e.target.closest('button') || e.target.closest('a')) return;
     e.stopPropagation();
@@ -950,13 +835,15 @@ function MarkdownContent({
   return (
     <div className="space-y-3.5 text-slate-700 dark:text-slate-300 leading-relaxed">
       {blocks.map((block, idx) => {
-        const interactiveProps = {
-          'data-src-start': block.startOffset,
-          'data-src-end': block.endOffset,
-          onClick: (e) => handleBlockClick(e, block),
-          onDoubleClick: (e) => handleBlockDoubleClick(e, block),
-          title: 'Click to select in editor • Double-click to place cursor at exact spot'
-        };
+        const interactiveProps = linked
+          ? {
+              'data-src-start': block.startOffset,
+              'data-src-end': block.endOffset,
+              onClick: (e) => handleBlockClick(e, block),
+              onDoubleClick: (e) => handleBlockDoubleClick(e, block),
+              title: 'Click to select in editor • Double-click to place cursor at exact spot'
+            }
+          : {};
 
         switch (block.type) {
           case 'math':
@@ -964,7 +851,7 @@ function MarkdownContent({
               <div
                 key={idx}
                 {...interactiveProps}
-                className="rounded-xl transition-all hover:ring-2 hover:ring-indigo-400/40 cursor-pointer"
+                className={`rounded-xl transition-all ${linked ? 'hover:ring-2 hover:ring-indigo-400/40 cursor-pointer' : ''}`}
               >
                 <MathRenderer
                   tex={block.tex}
@@ -979,8 +866,9 @@ function MarkdownContent({
               return (
                 <h1
                   key={idx}
+                  id={`h-${block.startOffset}`}
                   {...interactiveProps}
-                  className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-white pt-1 pb-2.5 border-b border-slate-200 dark:border-slate-800 rounded-md hover:bg-indigo-500/[0.04] transition-colors cursor-pointer"
+                  className={`text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-white pt-1 pb-2.5 border-b border-slate-200 dark:border-slate-800 rounded-md transition-colors ${linked ? 'hover:bg-indigo-500/[0.04] cursor-pointer' : ''}`}
                 >
                   {renderInlineMarkdown(block.text, katexReady)}
                 </h1>
@@ -990,8 +878,9 @@ function MarkdownContent({
               return (
                 <h2
                   key={idx}
+                  id={`h-${block.startOffset}`}
                   {...interactiveProps}
-                  className="text-lg sm:text-xl font-semibold tracking-tight text-slate-900 dark:text-slate-100 pt-3 rounded-md hover:bg-indigo-500/[0.04] transition-colors cursor-pointer"
+                  className={`text-lg sm:text-xl font-semibold tracking-tight text-slate-900 dark:text-slate-100 pt-3 rounded-md transition-colors ${linked ? 'hover:bg-indigo-500/[0.04] cursor-pointer' : ''}`}
                 >
                   {renderInlineMarkdown(block.text, katexReady)}
                 </h2>
@@ -1001,8 +890,9 @@ function MarkdownContent({
               return (
                 <h3
                   key={idx}
+                  id={`h-${block.startOffset}`}
                   {...interactiveProps}
-                  className="text-base font-semibold text-slate-800 dark:text-slate-200 pt-2 rounded-md hover:bg-indigo-500/[0.04] transition-colors cursor-pointer"
+                  className={`text-base font-semibold text-slate-800 dark:text-slate-200 pt-2 rounded-md transition-colors ${linked ? 'hover:bg-indigo-500/[0.04] cursor-pointer' : ''}`}
                 >
                   {renderInlineMarkdown(block.text, katexReady)}
                 </h3>
@@ -1011,8 +901,9 @@ function MarkdownContent({
             return (
               <h4
                 key={idx}
+                id={`h-${block.startOffset}`}
                 {...interactiveProps}
-                className="text-sm font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400 pt-1 rounded-md hover:bg-indigo-500/[0.04] transition-colors cursor-pointer"
+                className={`text-sm font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400 pt-1 rounded-md transition-colors ${linked ? 'hover:bg-indigo-500/[0.04] cursor-pointer' : ''}`}
               >
                 {renderInlineMarkdown(block.text, katexReady)}
               </h4>
@@ -1024,7 +915,7 @@ function MarkdownContent({
               <hr
                 key={idx}
                 {...interactiveProps}
-                className="my-5 border-slate-200 dark:border-slate-800 cursor-pointer"
+                className={`my-5 border-slate-200 dark:border-slate-800 ${linked ? 'cursor-pointer' : ''}`}
               />
             );
 
@@ -1033,7 +924,7 @@ function MarkdownContent({
               <blockquote
                 key={idx}
                 {...interactiveProps}
-                className="pl-4 py-2 pr-3 my-3 border-l-4 border-indigo-400 dark:border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/30 rounded-r-lg text-sm text-slate-700 dark:text-slate-300 hover:ring-2 hover:ring-indigo-400/30 transition-all cursor-pointer"
+                className={`pl-4 py-2 pr-3 my-3 border-l-4 border-indigo-400 dark:border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/30 rounded-r-lg text-sm text-slate-700 dark:text-slate-300 transition-all ${linked ? 'hover:ring-2 hover:ring-indigo-400/30 cursor-pointer' : ''}`}
               >
                 {renderInlineMarkdown(block.text, katexReady)}
               </blockquote>
@@ -1044,7 +935,7 @@ function MarkdownContent({
               <div
                 key={idx}
                 {...interactiveProps}
-                className="rounded-lg hover:ring-2 hover:ring-indigo-400/40 transition-all cursor-pointer"
+                className={`rounded-lg transition-all ${linked ? 'hover:ring-2 hover:ring-indigo-400/40 cursor-pointer' : ''}`}
               >
                 <CodeBlock language={block.lang} code={block.code} />
               </div>
@@ -1055,7 +946,7 @@ function MarkdownContent({
               <div
                 key={idx}
                 {...interactiveProps}
-                className="my-4 overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800 shadow-2xs hover:ring-2 hover:ring-indigo-400/30 transition-all cursor-pointer"
+                className={`my-4 overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800 shadow-2xs transition-all ${linked ? 'hover:ring-2 hover:ring-indigo-400/30 cursor-pointer' : ''}`}
               >
                 <table className="w-full text-sm text-left border-collapse">
                   <thead className="bg-slate-50 dark:bg-slate-900/90 border-b border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 font-semibold">
@@ -1075,7 +966,7 @@ function MarkdownContent({
                     {block.rows.map((row, rIdx) => (
                       <tr
                         key={rIdx}
-                        className="hover:bg-slate-50/80 dark:hover:bg-slate-900/40 transition-colors"
+                        className={`dark:hover:bg-slate-900/40 transition-colors ${linked ? 'hover:bg-slate-50/80' : ''}`}
                       >
                         {block.headers.map((_, cIdx) => (
                           <td
@@ -1098,7 +989,7 @@ function MarkdownContent({
               <ul
                 key={idx}
                 {...interactiveProps}
-                className="space-y-1.5 pl-5 list-disc marker:text-slate-400 rounded-md hover:bg-indigo-500/[0.03] transition-colors cursor-pointer"
+                className={`space-y-1.5 pl-5 list-disc marker:text-slate-400 rounded-md transition-colors ${linked ? 'hover:bg-indigo-500/[0.03] cursor-pointer' : ''}`}
               >
                 {block.items.map((item, iIdx) =>
                   item.isTask ? (
@@ -1133,7 +1024,7 @@ function MarkdownContent({
               <ol
                 key={idx}
                 {...interactiveProps}
-                className="space-y-1.5 pl-5 list-decimal marker:text-slate-500 marker:font-medium rounded-md hover:bg-indigo-500/[0.03] transition-colors cursor-pointer"
+                className={`space-y-1.5 pl-5 list-decimal marker:text-slate-500 marker:font-medium rounded-md transition-colors ${linked ? 'hover:bg-indigo-500/[0.03] cursor-pointer' : ''}`}
               >
                 {block.items.map((item, iIdx) => (
                   <li key={iIdx} className="pl-1">
@@ -1149,7 +1040,7 @@ function MarkdownContent({
               <p
                 key={idx}
                 {...interactiveProps}
-                className="text-[15px] leading-[1.7] text-slate-700 dark:text-slate-300 rounded-md hover:bg-indigo-500/[0.03] transition-colors cursor-pointer"
+                className={`text-[15px] leading-[1.7] text-slate-700 dark:text-slate-300 rounded-md transition-colors ${linked ? 'hover:bg-indigo-500/[0.03] cursor-pointer' : ''}`}
               >
                 {renderInlineMarkdown(block.text, katexReady)}
               </p>
@@ -1220,6 +1111,7 @@ function AccordionNode({
 
   return (
     <div
+      id={`sec-${node.id}`}
       data-accordion-node="true"
       data-depth={node.depth}
       data-product-level={node.productLevel || 0}
@@ -1227,7 +1119,7 @@ function AccordionNode({
       data-src-end={node.endOffset}
       onClick={handleContainerClick}
       onDoubleClick={handleContainerDoubleClick}
-      className={`my-4 rounded-xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900/70 shadow-2xs transition-all duration-200 overflow-hidden border-l-4 ${meta.borderAccent} ${
+      className={`scroll-mt-6 my-4 rounded-xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900/70 shadow-2xs transition-all duration-200 overflow-hidden border-l-4 ${meta.borderAccent} ${
         isSubProduct ? 'ml-1 sm:ml-2 ring-1 ring-emerald-500/15' : ''
       }`}
     >
@@ -1236,7 +1128,11 @@ function AccordionNode({
         onClick={handleHeaderClick}
         onDoubleClick={handleHeaderDoubleClick}
         aria-expanded={isOpen}
-        title="Click to toggle & select full section in Markdown • Double-click to jump caret to exact spot"
+        title={
+          onSelectRange
+            ? 'Click to toggle & select full section in Markdown • Double-click to jump caret to exact spot'
+            : undefined
+        }
         className={`w-full flex items-center justify-between gap-3 px-4 py-3 text-left transition-colors cursor-pointer select-none ${meta.headerBg}`}
       >
         <div className="flex items-center gap-2.5 min-w-0">
@@ -2235,6 +2131,100 @@ function generateStandaloneHtml(markdownText, initialDark = false) {
 // ============================================================================
 // HELPER TO DERIVE CLEAN DOCUMENT TITLE FROM MARKDOWN
 // ============================================================================
+// ============================================================================
+// VIEW MODE CONTENTS (layers + level 2-3 headings, in document order)
+// ============================================================================
+function buildToc(nodes, parentIds = [], level = 0, out = []) {
+  for (const node of nodes) {
+    if (node.type === 'accordion') {
+      const openIds = [...parentIds, node.id];
+      out.push({ id: node.id, domId: `sec-${node.id}`, title: node.title, level, depth: node.depth, openIds });
+      buildToc(node.children, openIds, level + 1, out);
+      continue;
+    }
+    // Heading ids match MarkdownContent's `h-${startOffset}` anchors.
+    let offset = node.startOffset;
+    let inFence = false;
+    for (const line of node.content.split('\n')) {
+      const trimmed = line.trim();
+      if (/^(`{3,}|~{3,})/.test(trimmed)) inFence = !inFence;
+      const m = !inFence && trimmed.match(/^(#{2,3})\s+(.+)$/);
+      if (m) {
+        out.push({
+          id: `h-${offset}`,
+          domId: `h-${offset}`,
+          title: m[2].replace(/[*`]/g, ''),
+          level: level + m[1].length - 2,
+          depth: null,
+          openIds: parentIds
+        });
+      }
+      offset += line.length + 1;
+    }
+  }
+  return out;
+}
+
+function ContentsRail({ toc, activeId, onJump }) {
+  return (
+    <nav
+      aria-label="Contents"
+      className="group absolute top-5 right-6 bottom-5 z-20 flex flex-col items-end pointer-events-none"
+    >
+      <button
+        type="button"
+        aria-label="Show contents"
+        className="pointer-events-auto max-h-full overflow-hidden flex flex-col items-end gap-2 p-2 -m-2 rounded-md cursor-pointer focus:outline-none"
+      >
+        {toc.map((entry) => (
+          <span
+            key={entry.id}
+            className={`block h-[3px] flex-shrink-0 rounded-full transition-colors ${
+              entry.id === activeId ? 'bg-indigo-500' : 'bg-slate-300 dark:bg-slate-600'
+            }`}
+            style={{ width: `${Math.max(6, 18 - entry.level * 4)}px` }}
+          />
+        ))}
+      </button>
+
+      <div className="pointer-events-auto invisible opacity-0 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100 transition-opacity absolute top-0 right-0 w-72 max-h-full flex flex-col rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg">
+        <div className="flex-shrink-0 px-4 pt-3 pb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 border-b border-slate-100 dark:border-slate-800">
+          Contents
+        </div>
+        <ul className="min-h-0 overflow-y-auto p-1.5">
+          {toc.map((entry) => {
+            const meta = entry.depth ? DEPTH_CONFIG[entry.depth] || DEPTH_CONFIG.general : null;
+            const isActive = entry.id === activeId;
+            return (
+              <li key={entry.id}>
+                <button
+                  type="button"
+                  title={entry.title}
+                  onClick={(e) => {
+                    onJump(entry);
+                    e.currentTarget.blur();
+                  }}
+                  style={{ paddingLeft: `${10 + entry.level * 14}px` }}
+                  className={`w-full flex items-center gap-2 pr-2.5 py-1.5 rounded-md text-left text-[13px] cursor-pointer transition-colors ${
+                    isActive
+                      ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 font-medium'
+                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${meta ? meta.dotColor : 'bg-transparent'}`}
+                  />
+                  <span className="truncate">{entry.title}</span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    </nav>
+  );
+}
+
 function deriveDocumentTitle(mdText) {
   const headingMatch = mdText.match(/^#\s+(.+)$/m);
   if (headingMatch && headingMatch[1].trim()) {
@@ -2258,42 +2248,28 @@ export default function App() {
     }
     return false;
   });
-  const defaultDocs = useMemo(
-    () => [
-      {
-        id: 'doc-initial-1',
-        fileName: 'dynamic-resource-task-allocator-v2.md',
-        title: 'Dynamic Resource & Task Allocator (v2.0)',
-        content: SAMPLE_PROPOSAL,
-        updatedAt: 'Default Spec'
-      },
-      {
-        id: 'doc-initial-2',
-        fileName: 'multi-altitude-latex-guide.md',
-        title: 'Multi-Altitude & LaTeX Authoring Guide',
-        content: SYNTAX_GUIDE_MD,
-        updatedAt: 'Template'
-      }
-    ],
+  const guideDoc = useMemo(
+    () => ({
+      id: GUIDE_DOC_ID,
+      title: 'Usage guide',
+      content: guideMarkdown,
+      updatedAt: 'Read-only'
+    }),
     []
   );
-  const [savedDocs, setSavedDocs] = useState(defaultDocs);
-  const [activeDocId, setActiveDocId] = useState('doc-initial-1');
-  const [dataDirHandle, setDataDirHandle] = useState(null);
-  const [hasViteDiskApi, setHasViteDiskApi] = useState(false);
-  const [folderStatus, setFolderStatus] = useState('Browser Disk Cache'); // 'Disk: data/' | 'Linked: data/' | 'Browser Disk Cache'
-  const [hydrated, setHydrated] = useState(false);
+  const [savedDocs, setSavedDocs] = useState([]);
+  const [activeDocId, setActiveDocId] = useState(GUIDE_DOC_ID);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [markdown, setMarkdown] = useState(SAMPLE_PROPOSAL);
-  const [viewMode, setViewMode] = useState('writer'); // 'writer' | 'reader' | 'spread' | 'guide'
+  const [markdown, setMarkdown] = useState(guideMarkdown);
+  const [viewMode, setViewMode] = useState('view'); // 'writer' | 'view'
   const [activePreset, setActivePreset] = useState('engineer');
   const [expandedIds, setExpandedIds] = useState({});
-  const [spreadIndex, setSpreadIndex] = useState(0);
   const [copiedMd, setCopiedMd] = useState(false);
   const [toastMessage, setToastMessage] = useState(null);
+  const [activeTocId, setActiveTocId] = useState(null);
 
   const textareaRef = useRef(null);
-  const previewContainerRef = useRef(null);
+  const viewScrollRef = useRef(null);
 
   useEffect(() => {
     if (typeof document !== 'undefined') {
@@ -2301,376 +2277,152 @@ export default function App() {
     }
   }, [darkMode]);
 
-  // Restore saved files from Vite data/ API (first), linked directory handle, or IndexedDB on startup
+  const toDoc = (f) => ({
+    id: `disk-${f.fileName}`,
+    fileName: f.fileName,
+    title: deriveDocumentTitle(f.content) || f.fileName.replace(/\.md$/i, ''),
+    content: f.content,
+    updatedAt: new Date(f.mtimeMs || Date.now()).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+  });
+
+  const fetchSavedFiles = async () => {
+    const res = await fetch('/api/files');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()).files.map(toDoc);
+  };
+
+  // Load user documents from data/saved/ and reopen the last one; the guide is the fallback.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      // 1. Try local Vite dev server `/api/files` backed by `.gitignore`d `data/` directory
-      try {
-        const res = await fetch('/api/files');
-        if (res.ok) {
-          const payload = await res.json();
-          if (!cancelled && Array.isArray(payload.files)) {
-            setHasViteDiskApi(true);
-            setFolderStatus('Disk: data/');
-            let diskFiles = payload.files.map((f) => ({
-              id: `disk-${f.fileName}`,
-              fileName: f.fileName,
-              title: deriveDocumentTitle(f.content) || f.fileName.replace(/\.md$/i, ''),
-              content: f.content,
-              updatedAt: new Date(f.mtimeMs || Date.now()).toLocaleTimeString([], {
-                hour: '2-digit',
-                minute: '2-digit'
-              })
-            }));
-
-            // Seed default proposal into data/ if only the standalone guide file exists on first boot
-            if (!diskFiles.some((d) => d.fileName !== GUIDE_FILE_NAME)) {
-              const seedFile = 'dynamic-resource-task-allocator-v2.md';
-              await fetch('/api/files', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ fileName: seedFile, content: SAMPLE_PROPOSAL })
-              });
-              diskFiles = [
-                {
-                  id: `disk-${seedFile}`,
-                  fileName: seedFile,
-                  title: deriveDocumentTitle(SAMPLE_PROPOSAL),
-                  content: SAMPLE_PROPOSAL,
-                  updatedAt: 'Saved'
-                },
-                ...diskFiles
-              ];
-            }
-
-            const storedActiveId = await idbGet('activeDocId');
-            const chosen =
-              diskFiles.find((d) => d.id === storedActiveId) ||
-              diskFiles.find((d) => d.fileName !== GUIDE_FILE_NAME) ||
-              diskFiles[0];
-
-            setSavedDocs(diskFiles);
-            if (chosen) {
-              setActiveDocId(chosen.id);
-              setMarkdown(chosen.content);
-            }
-            setHydrated(true);
-            return;
-          }
+    fetchSavedFiles()
+      .then((docs) => {
+        if (cancelled) return;
+        setSavedDocs(docs);
+        const last = docs.find((d) => d.id === localStorage.getItem(ACTIVE_DOC_KEY));
+        if (last) {
+          setActiveDocId(last.id);
+          setMarkdown(last.content);
         }
-      } catch {
-        // Not running behind Vite dev server middleware; fall back to File System Access API / IndexedDB
-      }
-
-      const storedDocs = await idbGet('savedDocs');
-      const storedActiveId = await idbGet('activeDocId');
-      const storedHandle = await idbGet('dataDirHandle');
-
-      if (cancelled) return;
-
-      if (storedHandle) {
-        setDataDirHandle(storedHandle);
-        try {
-          const perm = await storedHandle.queryPermission({ mode: 'readwrite' });
-          if (perm === 'granted') {
-            const diskDocs = await syncFromDirectoryHandle(storedHandle);
-            setFolderStatus(`Linked: ${storedHandle.name}/`);
-            if (diskDocs.length > 0) {
-              setSavedDocs(diskDocs);
-              const chosen =
-                diskDocs.find((d) => d.id === storedActiveId) || diskDocs[0];
-              setActiveDocId(chosen.id);
-              setMarkdown(chosen.content);
-              setHydrated(true);
-              return;
-            }
-          } else {
-            setFolderStatus(`Reconnect ${storedHandle.name}/`);
-          }
-        } catch {
-          setFolderStatus('Browser Disk Cache');
-        }
-      }
-
-      if (Array.isArray(storedDocs) && storedDocs.length > 0) {
-        setSavedDocs(storedDocs);
-        const chosen =
-          storedDocs.find((d) => d.id === storedActiveId) || storedDocs[0];
-        setActiveDocId(chosen.id);
-        setMarkdown(chosen.content);
-      }
-      setHydrated(true);
-    })();
+      })
+      .catch(() => {
+        if (!cancelled) triggerToast('Could not load data/saved/ (is the Vite server running?)');
+      });
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Automatically mirror savedDocs & activeDocId to IndexedDB so startup always restores them
   useEffect(() => {
-    if (!hydrated) return;
-    idbSet('savedDocs', savedDocs);
-    idbSet('activeDocId', activeDocId);
-  }, [savedDocs, activeDocId, hydrated]);
+    localStorage.setItem(ACTIVE_DOC_KEY, activeDocId);
+  }, [activeDocId]);
 
-  const handleLinkDataFolder = async () => {
-    // Reconnect previously stored handle if permission just needs re-granting
-    if (dataDirHandle && folderStatus.startsWith('Reconnect')) {
-      try {
-        const perm = await dataDirHandle.requestPermission({ mode: 'readwrite' });
-        if (perm === 'granted') {
-          const diskDocs = await syncFromDirectoryHandle(dataDirHandle);
-          setFolderStatus(`Linked: ${dataDirHandle.name}/`);
-          if (diskDocs.length > 0) {
-            setSavedDocs(diskDocs);
-            setActiveDocId(diskDocs[0].id);
-            setMarkdown(diskDocs[0].content);
-          } else {
-            // Seed current workspace files into the newly linked folder
-            for (const doc of savedDocs) {
-              const fname = doc.fileName || slugifyFileName(doc.title, doc.id);
-              await writeMarkdownToDirectory(dataDirHandle, fname, doc.content);
-            }
-          }
-          triggerToast(`Synced with local ${dataDirHandle.name}/ folder`);
-          return;
-        }
-      } catch {
-        // Fall through to directory picker
-      }
-    }
-
-    if (typeof window === 'undefined' || !window.showDirectoryPicker) {
-      triggerToast('Browser saved locally via IndexedDB (Directory Picker requires Chrome/Edge)');
-      return;
-    }
-
-    try {
-      const pickedHandle = await window.showDirectoryPicker({
-        id: 'depthdoc-data-folder',
-        mode: 'readwrite',
-        startIn: 'documents'
-      });
-      await idbSet('dataDirHandle', pickedHandle);
-      setDataDirHandle(pickedHandle);
-      setFolderStatus(`Linked: ${pickedHandle.name}/`);
-
-      const existingDiskDocs = await syncFromDirectoryHandle(pickedHandle);
-      if (existingDiskDocs.length > 0) {
-        setSavedDocs(existingDiskDocs);
-        setActiveDocId(existingDiskDocs[0].id);
-        setMarkdown(existingDiskDocs[0].content);
-        triggerToast(`Loaded ${existingDiskDocs.length} file(s) from ${pickedHandle.name}/`);
-      } else {
-        const seeded = [];
-        for (const doc of savedDocs) {
-          const fname = doc.fileName || slugifyFileName(doc.title, doc.id);
-          await writeMarkdownToDirectory(pickedHandle, fname, doc.content);
-          seeded.push({ ...doc, id: `fs-${fname}`, fileName: fname });
-        }
-        setSavedDocs(seeded);
-        if (seeded[0]) setActiveDocId(seeded[0].id);
-        triggerToast(`Saved workspace .md files into ${pickedHandle.name}/`);
-      }
-    } catch (err) {
-      if (err?.name !== 'AbortError') {
-        triggerToast('Could not open local folder; keeping local browser persistence');
-      }
-    }
-  };
-
-  const activeSavedDoc = useMemo(
-    () => savedDocs.find((d) => d.id === activeDocId) || null,
-    [savedDocs, activeDocId]
-  );
-
-  const hasUnsavedChanges = useMemo(() => {
-    if (!activeSavedDoc) return true;
-    return activeSavedDoc.content !== markdown;
-  }, [activeSavedDoc, markdown]);
+  const isGuide = activeDocId === GUIDE_DOC_ID;
+  const activeSavedDoc = isGuide ? guideDoc : savedDocs.find((d) => d.id === activeDocId) || null;
+  const hasUnsavedChanges = !isGuide && !!activeSavedDoc && activeSavedDoc.content !== markdown;
 
   const triggerToast = (msg) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 2600);
   };
 
-  const handleSaveCurrentDocument = async () => {
-    const title = deriveDocumentTitle(markdown);
-    const timeStamp = new Date().toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit'
+  const confirmDiscard = () =>
+    !hasUnsavedChanges || window.confirm('You have unsaved changes. Discard them?');
+
+  const postFile = async (fileName, content) => {
+    const res = await fetch('/api/files', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName, content })
     });
-    const targetFileName =
-      activeSavedDoc?.fileName || slugifyFileName(title, `proposal-${Date.now()}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  };
 
-    let wroteToFolder = false;
-    if (hasViteDiskApi) {
-      try {
-        const res = await fetch('/api/files', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fileName: targetFileName, content: markdown })
-        });
-        if (res.ok) {
-          wroteToFolder = true;
-          setFolderStatus('Disk: data/');
-        }
-      } catch {
-        // Fallback below
-      }
-    } else if (dataDirHandle) {
-      wroteToFolder = await writeMarkdownToDirectory(
-        dataDirHandle,
-        targetFileName,
-        markdown
-      );
-      if (wroteToFolder) {
-        setFolderStatus(`Linked: ${dataDirHandle.name}/`);
-      }
+  const handleSaveCurrentDocument = async () => {
+    if (isGuide || !activeSavedDoc) return;
+    try {
+      await postFile(activeSavedDoc.fileName, markdown);
+    } catch {
+      triggerToast('Save failed: could not write to data/saved/');
+      return;
     }
-
-    if (activeSavedDoc) {
-      setSavedDocs((prev) =>
-        prev.map((doc) =>
-          doc.id === activeDocId
-            ? {
-                ...doc,
-                fileName: targetFileName,
-                title,
-                content: markdown,
-                updatedAt: `Saved ${timeStamp}`
-              }
-            : doc
-        )
-      );
-    } else {
-      const newId = hasViteDiskApi
-        ? `disk-${targetFileName}`
-        : dataDirHandle
-        ? `fs-${targetFileName}`
-        : `doc-${Date.now()}`;
-      setSavedDocs((prev) => [
-        {
-          id: newId,
-          fileName: targetFileName,
-          title,
-          content: markdown,
-          updatedAt: `Saved ${timeStamp}`
-        },
-        ...prev
-      ]);
-      setActiveDocId(newId);
-    }
-
-    triggerToast(
-      wroteToFolder
-        ? `Saved data/${targetFileName} to local disk`
-        : `Saved "${title}" (persisted locally for startup)`
+    const timeStamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    setSavedDocs((prev) =>
+      prev.map((doc) =>
+        doc.id === activeDocId
+          ? { ...doc, title: deriveDocumentTitle(markdown), content: markdown, updatedAt: `Saved ${timeStamp}` }
+          : doc
+      )
     );
+    triggerToast(`Saved data/saved/${activeSavedDoc.fileName}`);
   };
 
   const handleSelectSavedDoc = async (doc) => {
-    let latestContent = doc.content;
-    // Re-read fresh file contents from data/ on click so external edits load immediately into the HTML preview
-    if (hasViteDiskApi && doc.fileName) {
-      try {
-        const res = await fetch('/api/files');
-        if (res.ok) {
-          const payload = await res.json();
-          const fresh = payload.files?.find((f) => f.fileName === doc.fileName);
-          if (fresh) {
-            latestContent = fresh.content;
-            setSavedDocs((prev) =>
-              prev.map((d) =>
-                d.id === doc.id
-                  ? {
-                      ...d,
-                      title: deriveDocumentTitle(fresh.content) || d.title,
-                      content: fresh.content
-                    }
-                  : d
-              )
-            );
-          }
-        }
-      } catch {
-        // Use cached content if fetch fails
+    if (doc.id === activeDocId || !confirmDiscard()) return;
+    if (doc.id === GUIDE_DOC_ID) {
+      setActiveDocId(GUIDE_DOC_ID);
+      setMarkdown(guideMarkdown);
+      setViewMode('view');
+      return;
+    }
+    let latest = doc;
+    // Re-read from disk so edits made in another editor show up
+    try {
+      const fresh = (await fetchSavedFiles()).find((d) => d.id === doc.id);
+      if (fresh) {
+        latest = fresh;
+        setSavedDocs((prev) => prev.map((d) => (d.id === doc.id ? fresh : d)));
       }
+    } catch {
+      // Use cached content if the server is unreachable
     }
     setActiveDocId(doc.id);
-    setMarkdown(latestContent);
-    if (viewMode === 'guide') {
-      setViewMode('writer');
-    }
-    triggerToast(`Loaded ${doc.fileName || doc.title}`);
+    setMarkdown(latest.content);
   };
 
   const handleCreateNewDoc = async () => {
-    const stampId = Date.now();
-    const fileName = `proposal-draft-${String(stampId).slice(-4)}.md`;
-    const newId = hasViteDiskApi
-      ? `disk-${fileName}`
-      : dataDirHandle
-      ? `fs-${fileName}`
-      : `doc-${stampId}`;
+    if (!confirmDiscard()) return;
+    const fileName = `draft-${Date.now()}.md`;
     const starterContent = `# New Proposal Draft\n\n:::executive[1. Executive Summary]\nOutline the core business objective, timeline, and expected ROI.\n:::\n\n:::product[Product Scope & User Experience]\nDescribe the user workflow and key deliverables.\n:::\n\n:::technical[Technical Architecture]\nDetail system components, APIs, and constraints.\n:::\n`;
-    const newDoc = {
-      id: newId,
-      fileName,
-      title: 'New Proposal Draft',
-      content: starterContent,
-      updatedAt: 'New Draft'
-    };
-    if (hasViteDiskApi) {
-      await fetch('/api/files', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileName, content: starterContent })
-      });
-    } else if (dataDirHandle) {
-      await writeMarkdownToDirectory(dataDirHandle, fileName, starterContent);
-    }
-    setSavedDocs((prev) => [newDoc, ...prev]);
-    setActiveDocId(newId);
-    setMarkdown(starterContent);
-    if (viewMode === 'guide') {
-      setViewMode('writer');
-    }
-    triggerToast(`Created data/${fileName}`);
-  };
-
-  const handleDeleteSavedDoc = async (e, docId) => {
-    e.stopPropagation();
-    if (savedDocs.length <= 1) {
-      triggerToast('At least one saved document must remain');
+    try {
+      await postFile(fileName, starterContent);
+    } catch {
+      triggerToast('Could not create a file in data/saved/');
       return;
     }
-    const target = savedDocs.find((d) => d.id === docId);
-    if (hasViteDiskApi && target?.fileName) {
-      try {
-        await fetch('/api/files', {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fileName: target.fileName })
-        });
-      } catch {
-        // Ignore
-      }
-    } else if (dataDirHandle && target?.fileName) {
-      try {
-        await dataDirHandle.removeEntry(target.fileName);
-      } catch {
-        // Ignore if file was already removed externally
-      }
+    const newDoc = toDoc({ fileName, content: starterContent });
+    setSavedDocs((prev) => [newDoc, ...prev]);
+    setActiveDocId(newDoc.id);
+    setMarkdown(starterContent);
+    setViewMode('writer');
+  };
+
+  const handleDeleteSavedDoc = async (e, doc) => {
+    e.stopPropagation();
+    if (!window.confirm(`Delete "${doc.title}"? This removes data/saved/${doc.fileName} from disk.`)) return;
+    try {
+      const res = await fetch('/api/files', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: doc.fileName })
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch {
+      triggerToast('Delete failed: could not reach data/saved/');
+      return;
     }
-    const remaining = savedDocs.filter((d) => d.id !== docId);
+    const remaining = savedDocs.filter((d) => d.id !== doc.id);
     setSavedDocs(remaining);
-    if (docId === activeDocId && remaining.length > 0) {
-      setActiveDocId(remaining[0].id);
-      setMarkdown(remaining[0].content);
+    if (doc.id === activeDocId) {
+      const next = remaining[0] || guideDoc;
+      setActiveDocId(next.id);
+      setMarkdown(next.content);
+      if (next === guideDoc) setViewMode('view');
     }
-    triggerToast('Removed saved file');
+    triggerToast(`Deleted ${doc.fileName}`);
   };
 
   useEffect(() => {
@@ -2684,19 +2436,12 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   });
 
-  const activeSource = useMemo(() => {
-    if (viewMode === 'guide') {
-      const guideDoc = savedDocs.find((d) => d.fileName === GUIDE_FILE_NAME);
-      return guideDoc ? guideDoc.content : SYNTAX_GUIDE_MD;
-    }
-    return markdown;
-  }, [viewMode, savedDocs, markdown]);
-  const ast = useMemo(() => parseDocumentTree(activeSource), [activeSource]);
+  const ast = useMemo(() => parseDocumentTree(markdown), [markdown]);
+  const toc = useMemo(() => buildToc(ast), [ast]);
   const allAccordions = useMemo(() => collectAccordions(ast), [ast]);
   const readingMetrics = useMemo(() => computeReadingMetrics(ast), [ast]);
 
   const handleSelectMarkdownRange = (startOffset, endOffset) => {
-    if (viewMode === 'guide') return;
     const applySelection = () => {
       const el = textareaRef.current;
       if (!el) return;
@@ -2719,7 +2464,6 @@ export default function App() {
   };
 
   const handleDoubleClickCaret = (event, startOffset, endOffset) => {
-    if (viewMode === 'guide') return;
     const safeStart = Math.max(0, Math.min(startOffset, markdown.length));
     const safeEnd = Math.max(safeStart, Math.min(endOffset, markdown.length));
     const sectionSlice = markdown.slice(safeStart, safeEnd);
@@ -2763,50 +2507,6 @@ export default function App() {
     }
   };
 
-  const spreadPages = useMemo(() => {
-    const estimateNodeWeight = (node) => {
-      if (node.type === 'markdown') {
-        return Math.max(140, node.content.length);
-      }
-      const isOpen = !!expandedIds[node.id];
-      if (!isOpen) return 150;
-      const childrenWeight = node.children.reduce((acc, child) => acc + estimateNodeWeight(child), 0);
-      return 180 + childrenWeight;
-    };
-
-    const weights = ast.map(estimateNodeWeight);
-    const totalWeight = weights.reduce((a, b) => a + b, 0);
-    const targetPerPage = Math.max(
-      950,
-      Math.ceil(totalWeight / Math.max(2, Math.ceil(totalWeight / 1600)))
-    );
-
-    const pages = [];
-    let currentPage = [];
-    let currentWeight = 0;
-
-    ast.forEach((node, idx) => {
-      if (currentPage.length > 0 && currentWeight + weights[idx] > targetPerPage) {
-        pages.push(currentPage);
-        currentPage = [];
-        currentWeight = 0;
-      }
-      currentPage.push(node);
-      currentWeight += weights[idx];
-    });
-    if (currentPage.length > 0) pages.push(currentPage);
-
-    if (pages.length === 1 && pages[0].length > 1) {
-      const mid = Math.ceil(pages[0].length / 2);
-      return [pages[0].slice(0, mid), pages[0].slice(mid)];
-    }
-
-    return pages;
-  }, [ast, expandedIds]);
-
-  const maxSpreadIndex = Math.max(0, Math.ceil(spreadPages.length / 2) - 1);
-  const safeSpreadIndex = Math.min(spreadIndex, maxSpreadIndex);
-
   const applyAudiencePreset = (preset, targetAccordions = allAccordions) => {
     setActivePreset(preset);
     const nextExpanded = {};
@@ -2839,17 +2539,42 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (viewMode === 'guide') {
-      const allOpen = {};
-      allAccordions.forEach((a) => {
-        allOpen[a.id] = true;
-      });
-      setExpandedIds(allOpen);
-    } else if (activePreset !== 'custom') {
+    setActiveTocId(null);
+    if (activePreset !== 'custom') {
       applyAudiencePreset(activePreset, allAccordions);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewMode, ast.length]);
+  }, [activeDocId, ast.length]);
+
+  // Open the target section (and the layers around it), then scroll it into view.
+  const handleJumpToSection = (entry) => {
+    if (entry.openIds.some((id) => !expandedIds[id])) {
+      setActivePreset('custom');
+      setExpandedIds((prev) => {
+        const next = { ...prev };
+        entry.openIds.forEach((id) => {
+          next[id] = true;
+        });
+        return next;
+      });
+    }
+    setActiveTocId(entry.id);
+    requestAnimationFrame(() =>
+      document.getElementById(entry.domId)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    );
+  };
+
+  const handleViewScroll = () => {
+    const container = viewScrollRef.current;
+    if (!container) return;
+    const line = container.getBoundingClientRect().top + 96;
+    let current = null;
+    for (const entry of toc) {
+      const el = document.getElementById(entry.domId);
+      if (el && el.getBoundingClientRect().top <= line) current = entry.id;
+    }
+    setActiveTocId(current);
+  };
 
   const handleToggleSingle = (id) => {
     setActivePreset('custom');
@@ -2955,141 +2680,192 @@ export default function App() {
     [allAccordions, expandedIds]
   );
 
+  const presetButtons = [
+    {
+      id: 'executive',
+      label: 'Executive',
+      hint: '(High-Level)',
+      Icon: Briefcase,
+      iconCls: 'text-amber-500',
+      activeCls: 'text-amber-700 dark:text-amber-300 ring-amber-500/30',
+      title: 'Show only high-level Executive summaries'
+    },
+    {
+      id: 'product',
+      label: 'Product / PM',
+      hint: '(Balanced)',
+      Icon: Users,
+      iconCls: 'text-emerald-500',
+      activeCls: 'text-emerald-700 dark:text-emerald-300 ring-emerald-500/30',
+      title: 'Show Executive + Product & Rollout details'
+    },
+    {
+      id: 'engineer',
+      label: 'Engineer',
+      hint: '(All Details)',
+      Icon: Terminal,
+      iconCls: 'text-blue-500',
+      activeCls: 'text-blue-700 dark:text-blue-300 ring-blue-500/30',
+      title: 'Expand all technical architecture, math & deep-dive specs'
+    }
+  ];
+
+  const modeButton = (mode, label, Icon, title, disabled = false) => (
+    <button
+      type="button"
+      onClick={() => setViewMode(mode)}
+      disabled={disabled}
+      aria-pressed={viewMode === mode}
+      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all ${
+        viewMode === mode
+          ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-2xs'
+          : 'text-slate-600 dark:text-slate-400 enabled:hover:text-slate-900 dark:enabled:hover:text-white'
+      } disabled:opacity-40 disabled:cursor-not-allowed enabled:cursor-pointer`}
+      title={title}
+    >
+      <Icon className="w-3.5 h-3.5" />
+      <span className="hidden sm:inline">{label}</span>
+    </button>
+  );
+
+  const docRow = (doc, { icon: RowIcon, subtitle, deletable }) => {
+    const isActive = doc.id === activeDocId;
+    return (
+      <div
+        key={doc.id}
+        onClick={() => handleSelectSavedDoc(doc)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            handleSelectSavedDoc(doc);
+          }
+        }}
+        className={`group w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-left transition-all cursor-pointer border ${
+          isActive
+            ? 'bg-white dark:bg-slate-800/90 border-indigo-200 dark:border-indigo-700/70 shadow-2xs'
+            : 'border-transparent hover:bg-white/70 dark:hover:bg-slate-800/40 text-slate-700 dark:text-slate-300'
+        }`}
+      >
+        <div className="flex items-start gap-2 min-w-0">
+          <RowIcon
+            className={`w-3.5 h-3.5 mt-0.5 flex-shrink-0 ${
+              isActive ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400 dark:text-slate-500'
+            }`}
+          />
+          <div className="min-w-0">
+            <div
+              className={`text-xs truncate ${
+                isActive
+                  ? 'font-semibold text-indigo-700 dark:text-indigo-300'
+                  : 'font-medium text-slate-700 dark:text-slate-200'
+              }`}
+            >
+              {doc.title}
+            </div>
+            <div className="flex items-center gap-1.5 text-[10px] text-slate-400 dark:text-slate-500 mt-0.5">
+              <span className="truncate">{subtitle}</span>
+              {isActive && hasUnsavedChanges && (
+                <span className="flex-shrink-0 text-amber-600 dark:text-amber-400 font-medium">• Unsaved</span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {deletable && (
+          <button
+            type="button"
+            onClick={(e) => handleDeleteSavedDoc(e, doc)}
+            className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1 rounded hover:bg-rose-500/10 text-slate-400 hover:text-rose-500 transition-all cursor-pointer flex-shrink-0"
+            title="Delete document"
+            aria-label={`Delete ${doc.title}`}
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+    );
+  };
+
   return (
-    <div className={darkMode ? 'dark' : ''}>
-      <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans selection:bg-indigo-500/20 transition-colors">
-        {/* =====================================================================
-            TOP-LEVEL GLOBAL AUDIENCE & VIEW CONTROL BAR
-           ===================================================================== */}
-        <header className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 shadow-2xs">
-          <div className="max-w-[1600px] mx-auto px-3 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-3">
-            {/* Sidebar Toggle, Brand & Document Title */}
-            <div className="flex items-center gap-2.5">
-              <button
-                type="button"
-                onClick={() => setSidebarOpen((prev) => !prev)}
-                className="p-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
-                title={sidebarOpen ? 'Hide Saved Files Sidebar' : 'Show Saved Files Sidebar'}
-                aria-label={sidebarOpen ? 'Hide Saved Files Sidebar' : 'Show Saved Files Sidebar'}
-              >
-                {sidebarOpen ? (
-                  <PanelLeftClose className="w-4 h-4" />
-                ) : (
-                  <PanelLeftOpen className="w-4 h-4" />
-                )}
-              </button>
-              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-600 to-violet-600 flex items-center justify-center text-white shadow-xs">
-                <Layers className="w-4 h-4" />
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-sm sm:text-base tracking-tight text-slate-900 dark:text-white">
-                  DepthDoc
-                </span>
-                <span className="hidden md:inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-indigo-50 dark:bg-indigo-950/70 text-indigo-700 dark:text-indigo-300 border border-indigo-200/80 dark:border-indigo-800">
-                  Multi-Altitude + LaTeX Math
-                </span>
-              </div>
+    <div className="h-screen flex flex-col overflow-hidden bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans selection:bg-indigo-500/20 transition-colors">
+      {/* TOP BAR: brand, audience presets, file & mode controls */}
+      <header className="flex-shrink-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 shadow-2xs">
+        <div className="px-3 sm:px-5 py-2.5 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => setSidebarOpen((prev) => !prev)}
+              className="p-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
+              title={sidebarOpen ? 'Hide documents sidebar' : 'Show documents sidebar'}
+              aria-label={sidebarOpen ? 'Hide documents sidebar' : 'Show documents sidebar'}
+            >
+              {sidebarOpen ? <PanelLeftClose className="w-4 h-4" /> : <PanelLeftOpen className="w-4 h-4" />}
+            </button>
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-600 to-violet-600 flex items-center justify-center text-white shadow-xs">
+              <Layers className="w-4 h-4" />
             </div>
+            <span className="font-bold text-sm sm:text-base tracking-tight text-slate-900 dark:text-white">
+              DepthDoc
+            </span>
+          </div>
 
-            {/* Global Audience Depth Presets */}
-            <div className="flex flex-wrap items-center gap-1.5 bg-slate-100/90 dark:bg-slate-800/80 p-1 rounded-xl border border-slate-200/80 dark:border-slate-700/80">
-              <span className="hidden xl:flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 px-2">
-                <Sparkles className="w-3 h-3 text-indigo-500" />
-                Audience Depth:
+          {/* Audience depth presets */}
+          <div className="flex flex-wrap items-center gap-1.5 bg-slate-100/90 dark:bg-slate-800/80 p-1 rounded-xl border border-slate-200/80 dark:border-slate-700/80">
+            <span className="hidden xl:flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 px-2">
+              <Sparkles className="w-3 h-3 text-indigo-500" />
+              Audience Depth:
+            </span>
+            {presetButtons.map(({ id, label, hint, Icon, iconCls, activeCls, title }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => applyAudiencePreset(id)}
+                aria-pressed={activePreset === id}
+                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                  activePreset === id
+                    ? `bg-white dark:bg-slate-900 shadow-xs ring-1 ${activeCls}`
+                    : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                }`}
+                title={title}
+              >
+                <Icon className={`w-3.5 h-3.5 ${iconCls}`} />
+                <span>{label}</span>
+                <span className="hidden 2xl:inline text-[11px] opacity-75">{hint}</span>
+              </button>
+            ))}
+            <div className="h-4 w-px bg-slate-300 dark:bg-slate-700 mx-0.5" />
+            <button
+              type="button"
+              onClick={handleExpandAll}
+              className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer"
+              title="Expand all collapsible layers"
+            >
+              <ChevronsUpDown className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">Expand All</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleCollapseAll}
+              className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer"
+              title="Collapse all collapsible layers"
+            >
+              <ChevronsDownUp className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">Collapse All</span>
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {isGuide ? (
+              <span
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400"
+                title="The usage guide can't be edited or deleted"
+              >
+                <Lock className="w-3.5 h-3.5" />
+                Read-only
               </span>
-
-              <button
-                type="button"
-                onClick={() => applyAudiencePreset('executive')}
-                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                  activePreset === 'executive'
-                    ? 'bg-white dark:bg-slate-900 text-amber-700 dark:text-amber-300 shadow-xs ring-1 ring-amber-500/30'
-                    : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-                }`}
-                title="Show only high-level Executive summaries"
-              >
-                <Briefcase className="w-3.5 h-3.5 text-amber-500" />
-                <span>Executive</span>
-                <span className="hidden sm:inline text-[11px] opacity-75">(High-Level)</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => applyAudiencePreset('product')}
-                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                  activePreset === 'product'
-                    ? 'bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-300 shadow-xs ring-1 ring-emerald-500/30'
-                    : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-                }`}
-                title="Show Executive + Product & Rollout details"
-              >
-                <Users className="w-3.5 h-3.5 text-emerald-500" />
-                <span>Product / PM</span>
-                <span className="hidden sm:inline text-[11px] opacity-75">(Balanced)</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => applyAudiencePreset('engineer')}
-                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                  activePreset === 'engineer'
-                    ? 'bg-white dark:bg-slate-900 text-blue-700 dark:text-blue-300 shadow-xs ring-1 ring-blue-500/30'
-                    : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-                }`}
-                title="Expand all technical architecture, math & deep-dive specs"
-              >
-                <Terminal className="w-3.5 h-3.5 text-blue-500" />
-                <span>Engineer</span>
-                <span className="hidden sm:inline text-[11px] opacity-75">(All Details)</span>
-              </button>
-
-              <div className="h-4 w-px bg-slate-300 dark:bg-slate-700 mx-0.5" />
-
-              <button
-                type="button"
-                onClick={handleExpandAll}
-                className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer"
-                title="Expand all collapsible layers"
-              >
-                <ChevronsUpDown className="w-3.5 h-3.5" />
-                <span className="hidden md:inline">Expand All</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleCollapseAll}
-                className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer"
-                title="Collapse all collapsible layers"
-              >
-                <ChevronsDownUp className="w-3.5 h-3.5" />
-                <span className="hidden md:inline">Collapse All</span>
-              </button>
-            </div>
-
-            {/* Right Controls: Save, View Modes (Writer / Single Reader / 2-Page Side-by-Side) & Export */}
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={handleLinkDataFolder}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer shadow-2xs ${
-                  folderStatus.startsWith('Linked:') || folderStatus.startsWith('Disk:')
-                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/20'
-                    : 'bg-amber-500/15 text-amber-800 dark:text-amber-300 border-amber-500/40 hover:bg-amber-500/25'
-                }`}
-                title="Select or sync local data/ folder (.gitignored)"
-              >
-                {folderStatus.startsWith('Linked:') || folderStatus.startsWith('Disk:') ? (
-                  <HardDrive className="w-3.5 h-3.5 text-emerald-500" />
-                ) : (
-                  <FolderSync className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
-                )}
-                <span>
-                  {folderStatus.startsWith('Linked:') || folderStatus.startsWith('Disk:')
-                    ? folderStatus
-                    : 'data/ Folder'}
-                </span>
-              </button>
-
+            ) : (
               <button
                 type="button"
                 onClick={handleSaveCurrentDocument}
@@ -3098,240 +2874,98 @@ export default function App() {
                     ? 'bg-indigo-600 hover:bg-indigo-500 text-white ring-2 ring-indigo-500/30'
                     : 'bg-emerald-600 hover:bg-emerald-500 text-white'
                 }`}
-                title="Save current Markdown file to data/ and sidebar (Ctrl+S / Cmd+S)"
+                title="Save to data/saved/ (Ctrl+S / Cmd+S)"
               >
-                {hasUnsavedChanges ? (
-                  <Save className="w-3.5 h-3.5" />
-                ) : (
-                  <Check className="w-3.5 h-3.5" />
-                )}
+                {hasUnsavedChanges ? <Save className="w-3.5 h-3.5" /> : <Check className="w-3.5 h-3.5" />}
                 <span>{hasUnsavedChanges ? 'Save File' : 'Saved'}</span>
               </button>
+            )}
 
-              <div className="flex items-center bg-slate-100 dark:bg-slate-800 p-1 rounded-lg border border-slate-200/80 dark:border-slate-700/80 text-xs font-medium">
-                <button
-                  type="button"
-                  onClick={() => setViewMode('writer')}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all cursor-pointer ${
-                    viewMode === 'writer'
-                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-2xs'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                  }`}
-                  title="Default Split-Pane Writer (Editor + Live Preview)"
-                >
-                  <Columns className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Writer</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode('reader')}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all cursor-pointer ${
-                    viewMode === 'reader'
-                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-2xs'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                  }`}
-                  title="Single-Page Editorial Reader"
-                >
-                  <FileText className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Single Page</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSpreadIndex(0);
-                    setViewMode('spread');
-                  }}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all cursor-pointer ${
-                    viewMode === 'spread'
-                      ? 'bg-white dark:bg-slate-900 text-indigo-700 dark:text-indigo-300 shadow-2xs font-semibold'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                  }`}
-                  title="Full 2-Page Side-by-Side Book Spread Previewer"
-                >
-                  <BookCopy className="w-3.5 h-3.5 text-indigo-500" />
-                  <span className="hidden sm:inline">2-Page Preview</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode('guide')}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all cursor-pointer ${
-                    viewMode === 'guide'
-                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-2xs'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                  }`}
-                  title="Hierarchy & LaTeX Syntax Guide"
-                >
-                  <HelpCircle className="w-3.5 h-3.5" />
-                  <span className="hidden md:inline">Guide</span>
-                </button>
-              </div>
+            <div className="flex items-center bg-slate-100 dark:bg-slate-800 p-1 rounded-lg border border-slate-200/80 dark:border-slate-700/80 text-xs font-medium">
+              {modeButton(
+                'writer',
+                'Write',
+                Columns,
+                isGuide ? "The usage guide is read-only" : 'Editor with live preview',
+                isGuide
+              )}
+              {modeButton('view', 'View', BookOpen, 'Read-only page with section navigation')}
+            </div>
 
+            <button
+              type="button"
+              onClick={handleCopyMarkdown}
+              className="hidden xl:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 transition-colors cursor-pointer"
+              title="Copy Raw Markdown"
+            >
+              {copiedMd ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+              <span>Copy MD</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleExportHtml}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 dark:bg-indigo-600 hover:bg-slate-800 dark:hover:bg-indigo-500 text-white shadow-2xs transition-colors cursor-pointer"
+              title="Download a standalone interactive HTML copy of this document"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Export HTML</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setDarkMode((prev) => !prev)}
+              className="p-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-amber-300 transition-colors cursor-pointer"
+              title={darkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+              aria-label={darkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            >
+              {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden">
+        {/* SIDEBAR: usage guide + documents in data/saved/ */}
+        {sidebarOpen && (
+          <aside className="w-full lg:w-64 flex-shrink-0 flex flex-col lg:min-h-0 border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-900/80">
+            <div className="flex-shrink-0 px-3.5 py-2.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Documents
+              </span>
               <button
                 type="button"
-                onClick={handleCopyMarkdown}
-                className="hidden xl:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 transition-colors cursor-pointer"
-                title="Copy Raw Markdown"
+                onClick={handleCreateNewDoc}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer"
+                title="Create a new document in data/saved/"
               >
-                {copiedMd ? (
-                  <Check className="w-3.5 h-3.5 text-emerald-500" />
-                ) : (
-                  <Copy className="w-3.5 h-3.5" />
-                )}
-                <span>Copy MD</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleExportHtml}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 dark:bg-indigo-600 hover:bg-slate-800 dark:hover:bg-indigo-500 text-white shadow-2xs transition-colors cursor-pointer"
-                title="Download standalone interactive HTML project with all styles, KaTeX math, and 2-page spread toggle"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Export HTML</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setDarkMode((prev) => !prev)}
-                className="p-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-amber-300 transition-colors cursor-pointer"
-                title={darkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-                aria-label={darkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-              >
-                {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+                <FilePlus2 className="w-3 h-3" />
+                <span>New</span>
               </button>
             </div>
-          </div>
-        </header>
 
-        {/* =====================================================================
-            MAIN WORKSPACE AREA (SIDEBAR + WRITER SPLIT, SINGLE READER, OR 2-PAGE SPREAD)
-           ===================================================================== */}
-        <main className="flex-1 flex flex-col lg:flex-row max-w-[1600px] w-full mx-auto overflow-hidden">
-          {/* FAR-LEFT SIDEBAR: SAVED MARKDOWN FILES NAVIGATOR */}
-          {sidebarOpen && (
-            <aside className="w-full lg:w-64 flex-shrink-0 flex flex-col border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-900/80">
-              <div className="px-3.5 py-2.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
-                <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                  <FolderOpen className="w-3.5 h-3.5 text-indigo-500" />
-                  <span>Saved Files ({savedDocs.length})</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleCreateNewDoc}
-                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer"
-                  title="Create a new Markdown document"
-                >
-                  <FilePlus2 className="w-3 h-3" />
-                  <span>New</span>
-                </button>
+            <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-1 max-h-60 lg:max-h-none">
+              {docRow(guideDoc, { icon: BookOpen, subtitle: 'Read-only', deletable: false })}
+              <div className="px-2.5 pt-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                Saved · data/saved/
               </div>
+              {savedDocs.length === 0 ? (
+                <p className="px-2.5 py-1 text-xs text-slate-400 dark:text-slate-500">
+                  No documents yet. Click New to start one.
+                </p>
+              ) : (
+                savedDocs.map((doc) =>
+                  docRow(doc, { icon: FileText, subtitle: doc.updatedAt, deletable: true })
+                )
+              )}
+            </div>
+          </aside>
+        )}
 
-              {/* Local data/ Folder Sync Banner */}
-              <div className="px-2.5 py-2 border-b border-slate-200/80 dark:border-slate-800 bg-white/60 dark:bg-slate-950/40">
-                <button
-                  type="button"
-                  onClick={handleLinkDataFolder}
-                  className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer ${
-                    folderStatus.startsWith('Linked:') || folderStatus.startsWith('Disk:')
-                      ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/15'
-                      : 'bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:bg-slate-200/70 dark:hover:bg-slate-800'
-                  }`}
-                  title="Local data/ folder persistence (.gitignored)"
-                >
-                  <span className="flex items-center gap-1.5 truncate">
-                    {folderStatus.startsWith('Linked:') || folderStatus.startsWith('Disk:') ? (
-                      <HardDrive className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
-                    ) : (
-                      <FolderSync className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" />
-                    )}
-                    <span className="truncate">
-                      {folderStatus.startsWith('Linked:') || folderStatus.startsWith('Disk:')
-                        ? folderStatus
-                        : folderStatus.startsWith('Reconnect')
-                        ? folderStatus
-                        : 'Link data/ Folder'}
-                    </span>
-                  </span>
-                  <span className="text-[10px] opacity-75 flex-shrink-0">
-                    {folderStatus.startsWith('Linked:') || folderStatus.startsWith('Disk:')
-                      ? '.gitignored'
-                      : 'Sync'}
-                  </span>
-                </button>
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-2 space-y-1 max-h-48 lg:max-h-[calc(100vh-148px)]">
-                {savedDocs.map((doc) => {
-                  const isActive = doc.id === activeDocId;
-                  const isDirty = isActive && hasUnsavedChanges;
-                  return (
-                    <div
-                      key={doc.id}
-                      onClick={() => handleSelectSavedDoc(doc)}
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          handleSelectSavedDoc(doc);
-                        }
-                      }}
-                      className={`group w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-left transition-all cursor-pointer border ${
-                        isActive
-                          ? 'bg-white dark:bg-slate-800/90 border-indigo-200 dark:border-indigo-700/70 shadow-2xs'
-                          : 'border-transparent hover:bg-white/70 dark:hover:bg-slate-800/40 text-slate-700 dark:text-slate-300'
-                      }`}
-                    >
-                      <div className="flex items-start gap-2 min-w-0">
-                        <FileText
-                          className={`w-3.5 h-3.5 mt-0.5 flex-shrink-0 ${
-                            isActive
-                              ? 'text-indigo-600 dark:text-indigo-400'
-                              : 'text-slate-400 dark:text-slate-500'
-                          }`}
-                        />
-                        <div className="min-w-0">
-                          <div
-                            className={`text-xs truncate ${
-                              isActive
-                                ? 'font-semibold text-indigo-700 dark:text-indigo-300'
-                                : 'font-medium text-slate-700 dark:text-slate-200'
-                            }`}
-                          >
-                            {doc.title}
-                          </div>
-                          <div className="flex items-center gap-1.5 text-[10px] text-slate-400 dark:text-slate-500 mt-0.5">
-                            <span>{doc.updatedAt}</span>
-                            {isDirty && (
-                              <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400 font-medium">
-                                • Unsaved
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-
-                      {savedDocs.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={(e) => handleDeleteSavedDoc(e, doc.id)}
-                          className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-rose-500/10 text-slate-400 hover:text-rose-500 transition-all cursor-pointer flex-shrink-0"
-                          title="Delete saved file"
-                          aria-label={`Delete ${doc.title}`}
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </aside>
-          )}
-
-          {/* LEFT PANE: MARKDOWN EDITOR WITH SYNTAX & FORMULA HELPER TOOLBAR */}
-          {viewMode === 'writer' && (
-            <section className="flex-1 min-w-0 lg:max-w-[44%] flex flex-col border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50">
+        {viewMode === 'writer' ? (
+          <>
+            {/* EDITOR */}
+            <section className="flex-1 min-w-0 lg:min-h-0 lg:max-w-[44%] flex flex-col border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50">
               <div className="px-3 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/90 flex flex-wrap items-center justify-between gap-2">
                 <div className="flex flex-wrap items-center gap-1">
                   <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mr-1">
@@ -3442,16 +3076,14 @@ export default function App() {
                   </button>
                 </div>
               </div>
-
               <textarea
                 ref={textareaRef}
                 value={markdown}
                 onChange={(e) => setMarkdown(e.target.value)}
                 spellCheck={false}
                 placeholder="Write your multi-level proposal in Markdown using :::executive[Title], :::product[Title], :::technical[Title], :::deep-dive[Title], and LaTeX formulas ($...$ or $$...$$)..."
-                className="flex-1 w-full min-h-[360px] lg:min-h-[calc(100vh-145px)] p-4 sm:p-5 font-mono text-[13px] leading-relaxed bg-transparent text-slate-800 dark:text-slate-200 resize-none focus:outline-none selection:bg-indigo-500/20"
+                className="flex-1 w-full min-h-[360px] lg:min-h-0 p-4 sm:p-5 font-mono text-[13px] leading-relaxed bg-transparent text-slate-800 dark:text-slate-200 resize-none focus:outline-none selection:bg-indigo-500/20"
               />
-
               <div className="px-4 py-2 border-t border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-900/90 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
                 <div className="flex items-center gap-3">
                   <span className="flex items-center gap-1 font-medium text-slate-600 dark:text-slate-300">
@@ -3478,154 +3110,11 @@ export default function App() {
                 </div>
               </div>
             </section>
-          )}
 
-          {/* RIGHT PANE: EDITORIAL MULTI-LEVEL DOCUMENT RENDERER */}
-          <section
-            className={`flex-1 overflow-y-auto bg-slate-100/70 dark:bg-slate-950 ${
-              viewMode === 'writer' ? 'lg:h-[calc(100vh-57px)]' : 'min-h-[calc(100vh-57px)]'
-            }`}
-          >
-            {viewMode === 'spread' && (
-              <div ref={previewContainerRef} className="hidden" aria-hidden="true">
-                <DocumentNodeList
-                  nodes={ast}
-                  expandedIds={expandedIds}
-                  onToggle={handleToggleSingle}
-                  katexReady={katexReady}
-                />
-              </div>
-            )}
-
-            {viewMode === 'spread' ? (
-              <div className="max-w-[1520px] mx-auto px-4 sm:px-8 py-6 sm:py-8">
-                <div className="mb-4 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-600 dark:text-slate-400">
-                  <div className="flex items-center gap-2.5">
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-indigo-50 dark:bg-indigo-950/70 text-indigo-700 dark:text-indigo-300 border border-indigo-200/80 dark:border-indigo-800 font-semibold">
-                      <BookCopy className="w-3.5 h-3.5" />
-                      2-Page Side-by-Side Spread Preview
-                    </span>
-                    <span className="font-medium">
-                      Pages {safeSpreadIndex * 2 + 1} –{' '}
-                      {Math.min(safeSpreadIndex * 2 + 2, Math.max(2, spreadPages.length))} of{' '}
-                      {Math.max(2, spreadPages.length)}
-                    </span>
-                    <span className="hidden md:inline text-slate-400">
-                      • {openCount}/{allAccordions.length} layers open
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {spreadPages.length > 2 && (
-                      <div className="flex items-center gap-1.5 mr-2">
-                        <button
-                          type="button"
-                          disabled={safeSpreadIndex <= 0}
-                          onClick={() => setSpreadIndex((p) => Math.max(0, p - 1))}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-40 font-semibold cursor-pointer"
-                        >
-                          <ChevronLeft className="w-3.5 h-3.5" />
-                          Prev Spread
-                        </button>
-                        <button
-                          type="button"
-                          disabled={safeSpreadIndex >= maxSpreadIndex}
-                          onClick={() => setSpreadIndex((p) => Math.min(maxSpreadIndex, p + 1))}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-40 font-semibold cursor-pointer"
-                        >
-                          Next Spread
-                          <ChevronRight className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={() => setViewMode('writer')}
-                      className="text-indigo-600 dark:text-indigo-400 hover:underline font-semibold cursor-pointer"
-                    >
-                      Back to Writer →
-                    </button>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
-                  <article className="bg-white dark:bg-slate-900/95 rounded-2xl lg:rounded-r-md border border-slate-200/90 dark:border-slate-800 shadow-[0_18px_40px_-15px_rgba(15,23,42,0.12)] flex flex-col justify-between min-h-[760px]">
-                    <div className="p-6 sm:p-9">
-                      <DocumentNodeList
-                        nodes={spreadPages[safeSpreadIndex * 2] || []}
-                        expandedIds={expandedIds}
-                        onToggle={handleToggleSingle}
-                        katexReady={katexReady}
-                        onSelectRange={handleSelectMarkdownRange}
-                        onDoubleClickCaret={handleDoubleClickCaret}
-                      />
-                    </div>
-                    <footer className="px-7 py-3.5 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-between text-[11px] font-mono text-slate-400">
-                      <span>DepthDoc Specification</span>
-                      <span>
-                        Page {safeSpreadIndex * 2 + 1} of {Math.max(2, spreadPages.length)}
-                      </span>
-                    </footer>
-                  </article>
-
-                  <article className="bg-white dark:bg-slate-900/95 rounded-2xl lg:rounded-l-md border border-slate-200/90 dark:border-slate-800 shadow-[0_18px_40px_-15px_rgba(15,23,42,0.12)] flex flex-col justify-between min-h-[760px]">
-                    <div className="p-6 sm:p-9">
-                      {spreadPages[safeSpreadIndex * 2 + 1] ? (
-                        <DocumentNodeList
-                          nodes={spreadPages[safeSpreadIndex * 2 + 1]}
-                          expandedIds={expandedIds}
-                          onToggle={handleToggleSingle}
-                          katexReady={katexReady}
-                          onSelectRange={handleSelectMarkdownRange}
-                          onDoubleClickCaret={handleDoubleClickCaret}
-                        />
-                      ) : (
-                        <div className="h-full min-h-[420px] flex flex-col items-center justify-center text-center text-slate-400 dark:text-slate-500 p-8">
-                          <BookOpen className="w-8 h-8 mb-2 opacity-40" />
-                          <p className="text-xs font-medium">End of Proposal Document</p>
-                        </div>
-                      )}
-                    </div>
-                    <footer className="px-7 py-3.5 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-between text-[11px] font-mono text-slate-400">
-                      <span>Multi-Level Interactive View</span>
-                      <span>
-                        Page {safeSpreadIndex * 2 + 2} of {Math.max(2, spreadPages.length)}
-                      </span>
-                    </footer>
-                  </article>
-                </div>
-              </div>
-            ) : (
-              <div
-                className={`mx-auto px-4 sm:px-8 py-6 sm:py-9 transition-all ${
-                  viewMode === 'writer' ? 'max-w-3xl' : 'max-w-4xl'
-                }`}
-              >
-                <div className="mb-4 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
-                  <div className="flex items-center gap-2">
-                    <BookOpen className="w-3.5 h-3.5 text-indigo-500" />
-                    <span>
-                      {viewMode === 'guide'
-                        ? 'Interactive Hierarchy & LaTeX Reference'
-                        : `Viewing ${openCount} of ${allAccordions.length} detail layers expanded`}
-                    </span>
-                  </div>
-                  {viewMode === 'reader' && (
-                    <button
-                      type="button"
-                      onClick={() => setViewMode('writer')}
-                      className="text-indigo-600 dark:text-indigo-400 hover:underline font-medium cursor-pointer"
-                    >
-                      Back to Writer →
-                    </button>
-                  )}
-                </div>
-
-                <article
-                  ref={previewContainerRef}
-                  className="bg-white dark:bg-slate-900/90 rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-sm p-6 sm:p-10"
-                >
+            {/* LIVE PREVIEW (click to select source) */}
+            <section className="flex-1 min-w-0 lg:min-h-0 lg:overflow-y-auto bg-slate-100/70 dark:bg-slate-950">
+              <div className="max-w-3xl mx-auto px-4 sm:px-8 py-6 sm:py-9">
+                <article className="bg-white dark:bg-slate-900/90 rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-sm p-6 sm:p-10">
                   <DocumentNodeList
                     nodes={ast}
                     expandedIds={expandedIds}
@@ -3636,17 +3125,34 @@ export default function App() {
                   />
                 </article>
               </div>
+            </section>
+          </>
+        ) : (
+          /* VIEW: read-only page, centred column, contents rail at the top right */
+          <section className="relative flex-1 min-w-0 lg:min-h-0 bg-white dark:bg-slate-900">
+            <div ref={viewScrollRef} onScroll={handleViewScroll} className="h-full overflow-y-auto">
+              <article className="max-w-[848px] mx-auto px-6 sm:px-16 pt-10 sm:pt-14 pb-32">
+                <DocumentNodeList
+                  nodes={ast}
+                  expandedIds={expandedIds}
+                  onToggle={handleToggleSingle}
+                  katexReady={katexReady}
+                />
+              </article>
+            </div>
+            {toc.length > 0 && (
+              <ContentsRail toc={toc} activeId={activeTocId} onJump={handleJumpToSection} />
             )}
           </section>
-        </main>
-
-        {toastMessage && (
-          <div className="fixed bottom-5 right-5 z-50 flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900 dark:bg-slate-800 text-white text-xs font-medium shadow-lg border border-slate-700 animate-fade-in">
-            <Check className="w-4 h-4 text-emerald-400" />
-            <span>{toastMessage}</span>
-          </div>
         )}
-      </div>
+      </main>
+
+      {toastMessage && (
+        <div className="fixed bottom-5 right-5 z-50 flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900 dark:bg-slate-800 text-white text-xs font-medium shadow-lg border border-slate-700">
+          <Check className="w-4 h-4 text-emerald-400" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
     </div>
   );
 }
