@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import guideMarkdown from '../data/usage-guide.md?raw';
 import {
   BookOpen,
@@ -123,8 +123,11 @@ function MathRenderer({ tex, displayMode = false, katexReady }) {
   const html = useMemo(() => {
     if (!katexReady || typeof window === 'undefined' || !window.katex) return null;
     try {
-      return window.katex.renderToString(tex.trim(), {
-        displayMode,
+      // Display formulas render in inline mode with \displaystyle so long equations can wrap at
+      // = and + instead of overflowing narrow nested sections. \tag needs real display mode.
+      const breakable = displayMode && !/\\tag/.test(tex);
+      return window.katex.renderToString(breakable ? `\\displaystyle ${tex.trim()}` : tex.trim(), {
+        displayMode: displayMode && !breakable,
         throwOnError: false,
         strict: false
       });
@@ -138,7 +141,7 @@ function MathRenderer({ tex, displayMode = false, katexReady }) {
       <div className="my-3.5 px-4 py-3.5 rounded-xl bg-slate-50/90 dark:bg-slate-900/90 border border-slate-200/90 dark:border-slate-800 overflow-x-auto text-center shadow-2xs">
         {html ? (
           <div
-            className="text-slate-900 dark:text-slate-100 text-base sm:text-lg"
+            className="text-slate-900 dark:text-slate-100 text-base leading-loose"
             dangerouslySetInnerHTML={{ __html: html }}
           />
         ) : (
@@ -196,7 +199,7 @@ function CodeBlock({ language, code }) {
           )}
         </button>
       </div>
-      <pre className="p-3.5 overflow-x-auto text-[13px] leading-relaxed font-mono text-slate-100">
+      <pre className="p-3.5 overflow-x-auto whitespace-pre-wrap break-words text-[13px] leading-relaxed font-mono text-slate-100">
         <code>{code}</code>
       </pre>
     </div>
@@ -468,8 +471,20 @@ function parseDocumentTree(markdown) {
               : rawTag;
 
           if (depth === 'executive' && context.insideExecutive && stopCondition !== null) {
+            // A `---` written just before the next executive separates the two pillars, so hand
+            // trailing rules/blank lines back to the root instead of ending this block with them.
+            let resumeAt = i;
+            while (
+              mdStartLine !== null &&
+              resumeAt > mdStartLine &&
+              /^(-{3,}|\*{3,}|_{3,})?$/.test(lines[resumeAt - 1].trim())
+            ) {
+              resumeAt--;
+              currentMarkdownLines.pop();
+            }
+            mdEndLine = resumeAt - 1;
             flushMarkdown();
-            return { nodes, nextIndex: i, endLineIndex: i - 1, unwindToRoot: true };
+            return { nodes, nextIndex: resumeAt, endLineIndex: resumeAt - 1, unwindToRoot: true };
           }
 
           flushMarkdown();
@@ -1119,7 +1134,7 @@ function AccordionNode({
       data-src-end={node.endOffset}
       onClick={handleContainerClick}
       onDoubleClick={handleContainerDoubleClick}
-      className={`scroll-mt-6 my-4 rounded-xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900/70 shadow-2xs transition-all duration-200 overflow-hidden border-l-4 ${meta.borderAccent} ${
+      className={`scroll-mt-6 my-4 first:mt-0 last:mb-0 rounded-xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900/70 shadow-2xs transition-all duration-200 overflow-hidden border-l-4 ${meta.borderAccent} ${
         isSubProduct ? 'ml-1 sm:ml-2 ring-1 ring-emerald-500/15' : ''
       }`}
     >
@@ -1170,7 +1185,7 @@ function AccordionNode({
       </button>
 
       {isOpen && (
-        <div className="px-4 sm:px-5 pb-4 pt-2 border-t border-slate-100 dark:border-slate-800/80 bg-slate-50/40 dark:bg-slate-950/30">
+        <div className="px-4 sm:px-5 pb-3 pt-2 border-t border-slate-100 dark:border-slate-800/80 bg-slate-50/40 dark:bg-slate-950/30">
           <DocumentNodeList
             nodes={node.children}
             expandedIds={expandedIds}
@@ -2270,11 +2285,12 @@ export default function App() {
 
   const textareaRef = useRef(null);
   const viewScrollRef = useRef(null);
+  // Captured on first render, before the effect that persists activeDocId overwrites it
+  const lastOpenedId = useRef(localStorage.getItem(ACTIVE_DOC_KEY));
 
-  useEffect(() => {
-    if (typeof document !== 'undefined') {
-      document.documentElement.classList.toggle('dark', darkMode);
-    }
+  // Layout effect so the theme is set before first paint (no light-to-dark fade on load)
+  useLayoutEffect(() => {
+    document.documentElement.classList.toggle('dark', darkMode);
   }, [darkMode]);
 
   const toDoc = (f) => ({
@@ -2301,7 +2317,7 @@ export default function App() {
       .then((docs) => {
         if (cancelled) return;
         setSavedDocs(docs);
-        const last = docs.find((d) => d.id === localStorage.getItem(ACTIVE_DOC_KEY));
+        const last = docs.find((d) => d.id === lastOpenedId.current);
         if (last) {
           setActiveDocId(last.id);
           setMarkdown(last.content);
@@ -2576,6 +2592,12 @@ export default function App() {
     setActiveTocId(current);
   };
 
+  // Opening/closing layers moves sections without a scroll event, so re-check the current one
+  useEffect(() => {
+    if (viewMode === 'view') handleViewScroll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expandedIds, viewMode, toc]);
+
   const handleToggleSingle = (id) => {
     setActivePreset('custom');
     setExpandedIds((prev) => ({
@@ -2789,7 +2811,7 @@ export default function App() {
   };
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans selection:bg-indigo-500/20 transition-colors">
+    <div className="relative h-screen flex flex-col overflow-hidden bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans selection:bg-indigo-500/20 transition-colors">
       {/* TOP BAR: brand, audience presets, file & mode controls */}
       <header className="flex-shrink-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 shadow-2xs">
         <div className="px-3 sm:px-5 py-2.5 flex flex-wrap items-center justify-between gap-3">
@@ -3112,9 +3134,9 @@ export default function App() {
             </section>
 
             {/* LIVE PREVIEW (click to select source) */}
-            <section className="flex-1 min-w-0 lg:min-h-0 lg:overflow-y-auto bg-slate-100/70 dark:bg-slate-950">
-              <div className="max-w-3xl mx-auto px-4 sm:px-8 py-6 sm:py-9">
-                <article className="bg-white dark:bg-slate-900/90 rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-sm p-6 sm:p-10">
+            <section className="relative flex-1 min-w-0 lg:min-h-0 lg:overflow-y-auto bg-slate-100/70 dark:bg-slate-950">
+              <div className="max-w-3xl mx-auto px-4 py-6">
+                <article className="bg-white dark:bg-slate-900/90 rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-sm p-5 sm:p-6">
                   <DocumentNodeList
                     nodes={ast}
                     expandedIds={expandedIds}
@@ -3130,7 +3152,7 @@ export default function App() {
         ) : (
           /* VIEW: read-only page, centred column, contents rail at the top right */
           <section className="relative flex-1 min-w-0 lg:min-h-0 bg-white dark:bg-slate-900">
-            <div ref={viewScrollRef} onScroll={handleViewScroll} className="h-full overflow-y-auto">
+            <div ref={viewScrollRef} onScroll={handleViewScroll} className="relative h-full overflow-y-auto">
               <article className="max-w-[848px] mx-auto px-6 sm:px-16 pt-10 sm:pt-14 pb-32">
                 <DocumentNodeList
                   nodes={ast}

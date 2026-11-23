@@ -1,2 +1,4 @@
 @import "tailwindcss";
 @custom-variant dark (&:where(.dark, .dark *));
+/* KaTeX defaults to 1.21em, which towers over body text */
+body .katex { font-size: 1.1em; }
